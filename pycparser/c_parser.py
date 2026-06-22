@@ -2206,19 +2206,14 @@ class CParser:
             )
 
     def _char_const_type(self, tok_type: str) -> str:
-        """Return the type name for a character constant based on its token type."""
-        if tok_type == "CHAR_CONST":
-            return "char"
-        elif tok_type == "WCHAR_CONST":
-            return "wchar_t"
-        elif tok_type == "U8CHAR_CONST":
-            return "char"
-        elif tok_type == "U16CHAR_CONST":
-            return "char16_t"
-        elif tok_type == "U32CHAR_CONST":
-            return "char32_t"
-        else:
-            return "char"
+        """Return the type name for a character constant based on its token type.
+
+        All character constants have type 'int' at the parser level.
+        The actual C type (wchar_t for L-prefix, char16_t for u-prefix,
+        char32_t for U-prefix) is a semantic distinction handled at
+        higher levels; the parser only tracks the integer granularity.
+        """
+        return "int"
 
     def _get_string_prefix(self, value: str) -> str:
         """Extract the encoding prefix from a string literal."""

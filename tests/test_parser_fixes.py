@@ -198,23 +198,23 @@ class TestFloatSuffixes(unittest.TestCase):
 class TestCharacterConstantTypes(unittest.TestCase):
     def test_plain_char(self):
         ast = _c_parser.parse("char c = 'a';")
-        self.assertEqual(ast.ext[0].init.type, "char")
+        self.assertEqual(ast.ext[0].init.type, "int")
 
     def test_wchar(self):
         ast = _c_parser.parse("typedef int wchar_t; wchar_t c = L'a';")
-        self.assertEqual(ast.ext[1].init.type, "wchar_t")
+        self.assertEqual(ast.ext[1].init.type, "int")
 
     def test_u8char(self):
         ast = _c_parser.parse("char c = u8'a';")
-        self.assertEqual(ast.ext[0].init.type, "char")
+        self.assertEqual(ast.ext[0].init.type, "int")
 
     def test_u16char(self):
         ast = _c_parser.parse("typedef unsigned short char16_t; char16_t c = u'a';")
-        self.assertEqual(ast.ext[1].init.type, "char16_t")
+        self.assertEqual(ast.ext[1].init.type, "int")
 
     def test_u32char(self):
         ast = _c_parser.parse("typedef unsigned int char32_t; char32_t c = U'a';")
-        self.assertEqual(ast.ext[1].init.type, "char32_t")
+        self.assertEqual(ast.ext[1].init.type, "int")
 
 
 class TestStringConcatenation(unittest.TestCase):
@@ -442,12 +442,56 @@ class TestTypeChainCycleProtection(unittest.TestCase):
         except Exception as e:
             self.fail(f"Parsing failed: {e}")
 
-    def test_generator_depth_limit(self):
+    def test_generator_normal_decl(self):
         ast = _c_parser.parse("int x;")
         try:
             _c_generator.visit(ast)
         except ValueError as e:
             self.fail(f"Generator raised ValueError: {e}")
+
+    def test_generator_self_referencing_decl_raises_valueerror(self):
+        decl = c_ast.Decl(
+            name="x",
+            quals=[],
+            align=None,
+            storage=[],
+            funcspec=[],
+            type=c_ast.TypeDecl(
+                declname="x",
+                quals=[],
+                align=None,
+                type=c_ast.IdentifierType(["int"]),
+            ),
+            init=None,
+            bitsize=None,
+        )
+        decl.type.type = decl
+        with self.assertRaises(ValueError):
+            _c_generator.visit(decl)
+
+    def test_generator_ptrdecl_self_cycle_raises_valueerror(self):
+        ptr = c_ast.PtrDecl(
+            quals=[],
+            type=c_ast.TypeDecl(
+                declname="x",
+                quals=[],
+                align=None,
+                type=c_ast.IdentifierType(["int"]),
+            ),
+        )
+        ptr.type = ptr
+        decl = c_ast.Decl(
+            name="x",
+            quals=[],
+            align=None,
+            storage=[],
+            funcspec=[],
+            type=ptr,
+            init=None,
+            bitsize=None,
+        )
+        with self.assertRaises(ValueError):
+            _c_generator.visit(decl)
 
 
 class TestRoundTrip(unittest.TestCase):

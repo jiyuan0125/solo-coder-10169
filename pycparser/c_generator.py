@@ -19,7 +19,6 @@ class CGenerator:
 
     indent_level: int
     reduce_parentheses: bool
-    _MAX_VISIT_DEPTH = 1000
 
     def __init__(self, reduce_parentheses: bool = False) -> None:
         """Constructs C-code generator
@@ -31,20 +30,22 @@ class CGenerator:
         # the _make_indent method.
         self.indent_level = 0
         self.reduce_parentheses = reduce_parentheses
-        self._visit_depth = 0
+        self._visit_stack: set = set()
+        self._type_gen_stack: set = set()
 
     def _make_indent(self) -> str:
         return " " * self.indent_level
 
     def visit(self, node: c_ast.Node) -> str:
-        self._visit_depth += 1
+        node_id = id(node)
+        if node_id in self._visit_stack:
+            raise ValueError("AST cycle detected (possible self-referencing node)")
+        self._visit_stack.add(node_id)
         try:
-            if self._visit_depth > self._MAX_VISIT_DEPTH:
-                raise ValueError("AST recursion too deep (possible cycle)")
             method = "visit_" + node.__class__.__name__
             return getattr(self, method, self.generic_visit)(node)
         finally:
-            self._visit_depth -= 1
+            self._visit_stack.discard(node_id)
 
     def generic_visit(self, node: Optional[c_ast.Node]) -> str:
         if node is None:
@@ -503,7 +504,21 @@ class CGenerator:
         encountered on the way down to a TypeDecl, to allow proper
         generation from it.
         """
-        # ~ print(n, modifiers)
+        node_id = id(n)
+        if node_id in self._type_gen_stack:
+            raise ValueError("AST cycle detected (possible self-referencing node)")
+        self._type_gen_stack.add(node_id)
+        try:
+            return self._generate_type_inner(n, modifiers, emit_declname)
+        finally:
+            self._type_gen_stack.discard(node_id)
+
+    def _generate_type_inner(
+        self,
+        n: c_ast.Node,
+        modifiers: List[c_ast.Node],
+        emit_declname: bool,
+    ) -> str:
         match n:
             case c_ast.TypeDecl():
                 s = ""
