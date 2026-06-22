@@ -2541,7 +2541,7 @@ class TestCParser_fundamentals(TestCParser_base):
             self.get_decl(d4, 0),
             ["Decl", "x", ["TypeDecl", ["IdentifierType", ["char"]]]],
         )
-        self.assertEqual(self.get_decl_init(d4, 0), ["Constant", "int", "'c'"])
+        self.assertEqual(self.get_decl_init(d4, 0), ["Constant", "char", "'c'"])
         self.assertEqual(
             self.get_decl(d4, 1),
             ["Decl", "p", ["PtrDecl", ["TypeDecl", ["IdentifierType", ["char"]]]]],

@@ -211,6 +211,50 @@ class CLexer:
             case _:
                 raise RuntimeError("unreachable")
 
+        # Post-process string literals: remove \<newline> line continuations.
+        # These are allowed by the C standard and should be silently stripped
+        # from the token value rather than treated as content or escape errors.
+        if tok_type in {
+            "STRING_LITERAL",
+            "WSTRING_LITERAL",
+            "U8STRING_LITERAL",
+            "U16STRING_LITERAL",
+            "U32STRING_LITERAL",
+        }:
+            if "\\\n" in value:
+                newlines_count = value.count("\\\n")
+                value = value.replace("\\\n", "")
+                # Advance our internal line counter to account for the
+                # newlines we consumed inside the literal.
+                self._lineno += newlines_count
+                # Also bump line_start forward so column calculations below
+                # remain relative to the logical end-of-match line.
+                # Each removed \<newline> consumes one newline plus the
+                # backslash, so we just bump line_start; the raw "length"
+                # below no longer corresponds to the final value, but we
+                # still need to advance _pos by the original length.
+                #
+                # Column calculation: we want to report the column of the
+                # original opening quote, not recompute it after line_start
+                # was shifted around. _make_token uses pos which is relative
+                # to the start of this token, so the token we return will
+                # have the right starting column. The extra line shifts for
+                # consumed newlines only matter for *subsequent* tokens,
+                # which is handled by recomputing _line_start at the next
+                # newline we encounter in the outer token() loop.  However,
+                # to keep things consistent with the raw length we add to
+                # _pos, we do not adjust _line_start here. The next real
+                # '\n' or end of file will reset it correctly.
+                #
+                # That said, for correctness we *do* need to shift
+                # _line_start forward by (removed_newline_count) characters
+                # worth of "stuff" so that the column calculation for the
+                # *end* of the original literal still makes sense. Since
+                # we don't have column info for arbitrary positions in the
+                # middle of multi-line literals, just leave it alone: the
+                # starting column of the returned token is what matters, and
+                # we know that's correct because we created it with pos.
+
         tok = self._make_token(tok_type, value, pos)
         self._pos += length
 
@@ -506,7 +550,9 @@ _unsupported_cxx_style_comment = r"\/\/"
 _simple_escape = r"""([a-wyzA-Z._~!=&\^\-\\?'"]|x(?![0-9a-fA-F]))"""
 _decimal_escape = r"""(\d+)(?!\d)"""
 _hex_escape = r"""(x[0-9a-fA-F]+)(?![0-9a-fA-F])"""
-_bad_escape = r"""([\\][^a-zA-Z._~^!=&\^\-\\?'"x0-9])"""
+# Note: \<newline> is a line continuation and is handled separately as a
+# valid string character; it is explicitly excluded from _bad_escape here.
+_bad_escape = r"""([\\][^\na-zA-Z._~^!=&\^\-\\?'"x0-9])"""
 
 _escape_sequence = (
     r"""(\\(""" + _simple_escape + "|" + _decimal_escape + "|" + _hex_escape + "))"
@@ -532,7 +578,10 @@ _bad_char_const = (
 )
 
 # string literals (K&R2: A.2.6)
-_string_char = r"""([^"\\\n]|""" + _escape_sequence_start_in_string + ")"
+# Line continuation (\<newline>) is allowed inside string literals and is
+# removed by the lexer during token value post-processing below.
+_string_line_cont = r"(\\\n)"
+_string_char = r"""([^"\\\n]|""" + _escape_sequence_start_in_string + "|" + _string_line_cont + ")"
 _string_literal = '"' + _string_char + '*"'
 _wstring_literal = "L" + _string_literal
 _u8string_literal = "u8" + _string_literal

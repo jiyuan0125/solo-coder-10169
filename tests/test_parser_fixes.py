@@ -144,12 +144,29 @@ class TestIntegerSuffixes(unittest.TestCase):
             ("0b1010u", "unsigned int"),
             ("0B1010L", "long int"),
             ("0b1010ull", "unsigned long long int"),
+            ("0b101UL", "unsigned int"),
+            ("0B101LU", "unsigned int"),
+            ("0b101uLL", "unsigned long long int"),
+            ("0B101LLu", "unsigned long long int"),
         ]
         for val, expected_type in tests:
             code = f"int x = {val};"
             ast = _c_parser.parse(code)
             init = ast.ext[0].init
             self.assertEqual(init.type, expected_type, f"Failed for {val}")
+
+    def test_binary_ul_differs_from_other_bases(self):
+        cases = [
+            ("0b101UL", "0x101UL"),
+            ("0b101LU", "0101LU"),
+        ]
+        for bin_val, other_val in cases:
+            code_bin = f"int a = {bin_val};"
+            code_other = f"int a = {other_val};"
+            ast_bin = _c_parser.parse(code_bin)
+            ast_other = _c_parser.parse(code_other)
+            self.assertEqual(ast_bin.ext[0].init.type, "unsigned int")
+            self.assertEqual(ast_other.ext[0].init.type, "unsigned long int")
 
     def test_invalid_suffixes(self):
         invalid = [
@@ -198,7 +215,7 @@ class TestFloatSuffixes(unittest.TestCase):
 class TestCharacterConstantTypes(unittest.TestCase):
     def test_plain_char(self):
         ast = _c_parser.parse("char c = 'a';")
-        self.assertEqual(ast.ext[0].init.type, "int")
+        self.assertEqual(ast.ext[0].init.type, "char")
 
     def test_wchar(self):
         ast = _c_parser.parse("typedef int wchar_t; wchar_t c = L'a';")
@@ -256,6 +273,42 @@ class TestStringConcatenation(unittest.TestCase):
     def test_three_wstrings_concat(self):
         ast = _c_parser.parse('typedef int wchar_t; wchar_t* s = L"a" L"b" L"c";')
         self.assertEqual(ast.ext[1].init.value, 'L"abc"')
+
+
+class TestStringLineContinuation(unittest.TestCase):
+    def test_simple_line_cont(self):
+        code = "char* s = \"foo\\\nbar\";"
+        ast = _c_parser.parse(code)
+        self.assertEqual(ast.ext[0].init.value, "\"foobar\"")
+
+    def test_line_cont_then_concat(self):
+        code = "char* s = \"foo\\\nbar\" \"baz\";"
+        ast = _c_parser.parse(code)
+        self.assertEqual(ast.ext[0].init.value, "\"foobarbaz\"")
+
+    def test_line_cont_with_hex_escape(self):
+        code = "char* s = \"a\\x41\\\nbc\";"
+        ast = _c_parser.parse(code)
+        self.assertEqual(ast.ext[0].init.value, '"a\\x41bc"')
+
+    def test_empty_line_cont(self):
+        code = "char* s = \"\\\n\";"
+        ast = _c_parser.parse(code)
+        self.assertEqual(ast.ext[0].init.value, "\"\"")
+
+    def test_three_segments_with_cont(self):
+        code = "char* s = \"a\\\nb\" \"c\\\nd\" \"e\";"
+        ast = _c_parser.parse(code)
+        self.assertEqual(ast.ext[0].init.value, "\"abcde\"")
+
+    def test_line_cont_roundtrip(self):
+        from pycparser import c_generator
+        gen = c_generator.CGenerator()
+        code = "char* s = \"a\\\nb\" \"c\\\nd\" \"e\";"
+        ast1 = _c_parser.parse(code)
+        out = gen.visit(ast1)
+        ast2 = _c_parser.parse(out)
+        self.assertEqual(ast1.ext[0].init.value, ast2.ext[0].init.value)
 
 
 class TestKnRFunctionDefinitions(unittest.TestCase):

@@ -2163,6 +2163,13 @@ class CParser:
                 f"Invalid integer constant suffix: {suffix!r}", self._tok_coord(tok)
             )
 
+        is_binary = lower.startswith("0b")
+        if is_binary and has_u:
+            if l_count >= 2:
+                return "unsigned long long int"
+            else:
+                return "unsigned int"
+
         if l_count == 0:
             return "unsigned int" if has_u else "int"
         elif l_count == 1:
@@ -2208,11 +2215,14 @@ class CParser:
     def _char_const_type(self, tok_type: str) -> str:
         """Return the type name for a character constant based on its token type.
 
-        All character constants have type 'int' at the parser level.
-        The actual C type (wchar_t for L-prefix, char16_t for u-prefix,
-        char32_t for U-prefix) is a semantic distinction handled at
-        higher levels; the parser only tracks the integer granularity.
+        Plain (unprefixed) single-character constants have type 'char' at the
+        parser level to match C standard's granularity for 'x'.
+        Prefixed constants (L/u8/u/U) and multi-character constants are all
+        reported as 'int'; the semantic distinction (wchar_t, char16_t,
+        char32_t) is handled by higher-level passes.
         """
+        if tok_type == "CHAR_CONST":
+            return "char"
         return "int"
 
     def _get_string_prefix(self, value: str) -> str:
