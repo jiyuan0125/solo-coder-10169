@@ -2718,7 +2718,14 @@ class TestCParser_fundamentals(TestCParser_base):
                 "zzz",
                 [
                     "FuncDecl",
-                    [["ID", "p"], ["ID", "c"]],
+                    [
+                        ["Decl", "p", ["TypeDecl", ["IdentifierType", ["long"]]]],
+                        [
+                            "Decl",
+                            "c",
+                            ["PtrDecl", ["TypeDecl", ["IdentifierType", ["long"]]]],
+                        ],
+                    ],
                     ["PtrDecl", ["TypeDecl", ["IdentifierType", ["char"]]]],
                 ],
             ],

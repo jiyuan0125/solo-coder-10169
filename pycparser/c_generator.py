@@ -19,6 +19,7 @@ class CGenerator:
 
     indent_level: int
     reduce_parentheses: bool
+    _MAX_VISIT_DEPTH = 1000
 
     def __init__(self, reduce_parentheses: bool = False) -> None:
         """Constructs C-code generator
@@ -30,13 +31,20 @@ class CGenerator:
         # the _make_indent method.
         self.indent_level = 0
         self.reduce_parentheses = reduce_parentheses
+        self._visit_depth = 0
 
     def _make_indent(self) -> str:
         return " " * self.indent_level
 
     def visit(self, node: c_ast.Node) -> str:
-        method = "visit_" + node.__class__.__name__
-        return getattr(self, method, self.generic_visit)(node)
+        self._visit_depth += 1
+        try:
+            if self._visit_depth > self._MAX_VISIT_DEPTH:
+                raise ValueError("AST recursion too deep (possible cycle)")
+            method = "visit_" + node.__class__.__name__
+            return getattr(self, method, self.generic_visit)(node)
+        finally:
+            self._visit_depth -= 1
 
     def generic_visit(self, node: Optional[c_ast.Node]) -> str:
         if node is None:

@@ -11,6 +11,13 @@ from typing import Any, List, Tuple, cast
 
 from . import c_ast
 
+_MAX_TYPE_CHAIN_DEPTH = 1000
+
+
+def _check_type_chain_depth(depth: int, coord: Any = None) -> None:
+    if depth > _MAX_TYPE_CHAIN_DEPTH:
+        raise ValueError("Type chain too deep (possible cycle)")
+
 
 def fix_switch_cases(switch_node: c_ast.Switch) -> c_ast.Switch:
     """The 'case' statements in a 'switch' come out of parsing with one
@@ -104,8 +111,10 @@ def _extract_nested_case(
     """Recursively extract consecutive Case statements that are made nested
     by the parser and add them to the stmts_list.
     """
+    if not case_node.stmts:
+        return
     if isinstance(case_node.stmts[0], (c_ast.Case, c_ast.Default)):
-        nested = case_node.stmts.pop()
+        nested = case_node.stmts.pop(0)
         stmts_list.append(nested)
         _extract_nested_case(cast(Any, nested), stmts_list)
 
@@ -120,18 +129,21 @@ def fix_atomic_specifiers(
     structure, by removing spurious Typename->TypeDecl pairs and attaching
     the _Atomic qualifier in the right place.
     """
-    # There can be multiple levels of _Atomic in a decl; fix them until a
-    # fixed point is reached.
+    iterations = 0
     while True:
+        iterations += 1
+        if iterations > _MAX_TYPE_CHAIN_DEPTH:
+            raise ValueError("Type chain too deep (possible cycle)")
         decl, found = _fix_atomic_specifiers_once(decl)
         if not found:
             break
 
-    # Make sure to add an _Atomic qual on the topmost decl if needed. Also
-    # restore the declname on the innermost TypeDecl (it gets placed in the
-    # wrong place during construction).
     typ: Any = decl
+    depth = 0
     while not isinstance(typ, c_ast.TypeDecl):
+        depth += 1
+        if depth > _MAX_TYPE_CHAIN_DEPTH:
+            raise ValueError("Type chain too deep (possible cycle)")
         try:
             typ = typ.type
         except AttributeError:
@@ -153,7 +165,11 @@ def _fix_atomic_specifiers_once(
     parent: Any = decl
     grandparent: Any = None
     node: Any = decl.type
+    depth = 0
     while node is not None:
+        depth += 1
+        if depth > _MAX_TYPE_CHAIN_DEPTH:
+            return decl, False
         if isinstance(node, c_ast.Typename) and "_Atomic" in node.quals:
             break
         try:
@@ -161,9 +177,6 @@ def _fix_atomic_specifiers_once(
             parent = node
             node = node.type
         except AttributeError:
-            # If we've reached a node without a `type` field, it means we won't
-            # find what we're looking for at this point; give up the search
-            # and return the original decl unmodified.
             return decl, False
 
     assert isinstance(parent, c_ast.TypeDecl)

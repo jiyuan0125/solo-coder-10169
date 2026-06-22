@@ -206,6 +206,8 @@ class CParser:
     # useful for pointers, that can come as a chain from the rule
     # p_pointer. In this case, the whole modifier list is spliced
     # into the new location.
+    _MAX_TYPE_CHAIN_DEPTH = 1000
+
     def _type_modify_decl(self, decl: Any, modifier: Any) -> c_ast.Node:
         """Tacks a type modifier on a declarator, and returns
         the modified declarator.
@@ -215,8 +217,13 @@ class CParser:
         modifier_head = modifier
         modifier_tail = modifier
 
-        # The modifier may be a nested list. Reach its tail.
+        depth = 0
         while modifier_tail.type:
+            depth += 1
+            if depth > self._MAX_TYPE_CHAIN_DEPTH:
+                self._parse_error(
+                    "Type chain too deep (possible cycle)", modifier.coord
+                )
             modifier_tail = modifier_tail.type
 
         # If the decl is a basic type, just tack the modifier onto it.
@@ -228,7 +235,13 @@ class CParser:
             # its tail and splice the modifier onto the tail,
             # pointing to the underlying basic type.
             decl_tail = decl
+            depth = 0
             while not isinstance(decl_tail.type, c_ast.TypeDecl):
+                depth += 1
+                if depth > self._MAX_TYPE_CHAIN_DEPTH:
+                    self._parse_error(
+                        "Type chain too deep (possible cycle)", decl.coord
+                    )
                 decl_tail = decl_tail.type
 
             modifier_tail.type = decl_tail.type
@@ -256,9 +269,14 @@ class CParser:
         typename: List[Any],
     ) -> c_ast.Decl | c_ast.Typedef | c_ast.Typename:
         """Fixes a declaration. Modifies decl."""
-        # Reach the underlying basic type
         typ = decl
+        depth = 0
         while not isinstance(typ, c_ast.TypeDecl):
+            depth += 1
+            if depth > self._MAX_TYPE_CHAIN_DEPTH:
+                self._parse_error(
+                    "Type chain too deep (possible cycle)", decl.coord
+                )
             typ = typ.type
 
         decl.name = typ.declname
@@ -435,6 +453,86 @@ class CParser:
         return c_ast.FuncDef(
             decl=declaration, param_decls=param_decls, body=body, coord=decl.coord
         )
+
+    def _merge_kr_param_decls(self, func_def: c_ast.Node) -> None:
+        """Merge K&R-style parameter declarations into the function's parameter list.
+
+        Replaces bare ID nodes in the ParamList with typed Decl nodes from
+        param_decls.  Performs array-to-pointer decay on array parameters.
+        Function-typed parameters are converted to function pointers.
+        """
+        if func_def.param_decls is None:
+            return
+
+        func_decl = func_def.decl
+        func_type_decl = func_decl.type
+        if not isinstance(func_type_decl, c_ast.FuncDecl):
+            return
+        if func_type_decl.args is None:
+            return
+
+        param_list = func_type_decl.args.params
+        param_decl_map = {pd.name: pd for pd in func_def.param_decls}
+
+        new_params = []
+        for param in param_list:
+            if isinstance(param, c_ast.ID):
+                name = param.name
+                if name in param_decl_map:
+                    decl = param_decl_map[name]
+                    decayed = self._decay_param_type(decl)
+                    new_params.append(decayed)
+                else:
+                    new_params.append(param)
+            else:
+                new_params.append(param)
+
+        func_type_decl.args.params = new_params
+
+    def _decay_param_type(self, decl: c_ast.Node) -> c_ast.Node:
+        """Apply parameter type decay (array-to-pointer, function-to-pointer).
+
+        Returns a new Decl node with the decayed type.
+        """
+        if isinstance(decl.type, c_ast.ArrayDecl):
+            new_type = c_ast.PtrDecl(
+                quals=[],
+                type=decl.type.type,
+                coord=decl.type.coord,
+            )
+            new_decl = c_ast.Decl(
+                name=decl.name,
+                quals=decl.quals,
+                align=decl.align,
+                storage=decl.storage,
+                funcspec=decl.funcspec,
+                type=new_type,
+                init=decl.init,
+                bitsize=decl.bitsize,
+                coord=decl.coord,
+            )
+            return new_decl
+
+        if isinstance(decl.type, c_ast.FuncDecl):
+            new_type = c_ast.PtrDecl(
+                quals=[],
+                type=decl.type,
+                coord=decl.type.coord,
+            )
+            new_decl = c_ast.Decl(
+                name=decl.name,
+                quals=decl.quals,
+                align=decl.align,
+                storage=decl.storage,
+                funcspec=decl.funcspec,
+                type=new_type,
+                init=decl.init,
+                bitsize=decl.bitsize,
+                coord=decl.coord,
+            )
+            return new_decl
+
+        return decl
 
     def _select_struct_union_class(self, token: str) -> type:
         """Given a token (either STRUCT or UNION), selects the
@@ -709,6 +807,7 @@ class CParser:
                 param_decls=param_decls,
                 body=self._parse_compound_statement(),
             )
+            self._merge_kr_param_decls(func)
             return [func]
 
         decl_dict: "_DeclInfo" = dict(decl=decl, init=None, bitsize=None)
@@ -2006,33 +2105,142 @@ class CParser:
     def _parse_constant(self) -> c_ast.Node:
         tok = self._advance()
         if tok.type in _INT_CONST:
-            u_count = 0
-            l_count = 0
-            for ch in tok.value[-3:]:
-                if ch in ("l", "L"):
-                    l_count += 1
-                elif ch in ("u", "U"):
-                    u_count += 1
-            if u_count > 1:
-                raise ValueError("Constant cannot have more than one u/U suffix.")
-            if l_count > 2:
-                raise ValueError("Constant cannot have more than two l/L suffix.")
-            prefix = "unsigned " * u_count + "long " * l_count
-            return c_ast.Constant(prefix + "int", tok.value, self._tok_coord(tok))
+            if tok.type == "INT_CONST_CHAR":
+                return c_ast.Constant("int", tok.value, self._tok_coord(tok))
+            type_name = self._parse_int_suffix(tok.value, tok)
+            return c_ast.Constant(type_name, tok.value, self._tok_coord(tok))
 
         if tok.type in _FLOAT_CONST:
-            if tok.value[-1] in ("f", "F"):
-                t = "float"
-            elif tok.value[-1] in ("l", "L"):
-                t = "long double"
-            else:
-                t = "double"
-            return c_ast.Constant(t, tok.value, self._tok_coord(tok))
+            type_name = self._parse_float_suffix(tok.value, tok)
+            return c_ast.Constant(type_name, tok.value, self._tok_coord(tok))
 
         if tok.type in _CHAR_CONST:
-            return c_ast.Constant("char", tok.value, self._tok_coord(tok))
+            type_name = self._char_const_type(tok.type)
+            return c_ast.Constant(type_name, tok.value, self._tok_coord(tok))
 
         self._parse_error("Invalid constant", self._tok_coord(tok))
+
+    def _parse_int_suffix(self, value: str, tok: Token) -> str:
+        """Parse and validate the integer suffix of a constant token.
+        Returns the standard C type name for the suffix.
+        Raises ParseError for invalid suffixes.
+        """
+        lower = value.lower()
+        suffix_start = len(value)
+        i = len(value) - 1
+        while i >= 0 and lower[i] in "ul":
+            i -= 1
+        suffix = value[i + 1 :]
+        suffix_lower = suffix.lower()
+
+        if not suffix:
+            return "int"
+
+        has_u = "u" in suffix_lower
+        l_count = suffix_lower.count("l")
+
+        if suffix_lower.count("u") > 1:
+            self._parse_error(
+                "Invalid integer constant suffix: multiple 'u' or 'U'", self._tok_coord(tok)
+            )
+        if l_count > 2:
+            self._parse_error(
+                "Invalid integer constant suffix: more than two 'l' or 'L'",
+                self._tok_coord(tok),
+            )
+
+        valid_suffixes = {
+            "u",
+            "l",
+            "ul",
+            "lu",
+            "ll",
+            "ull",
+            "llu",
+        }
+        if suffix_lower not in valid_suffixes:
+            self._parse_error(
+                f"Invalid integer constant suffix: {suffix!r}", self._tok_coord(tok)
+            )
+
+        if l_count == 0:
+            return "unsigned int" if has_u else "int"
+        elif l_count == 1:
+            return "unsigned long int" if has_u else "long int"
+        else:
+            return "unsigned long long int" if has_u else "long long int"
+
+    def _parse_float_suffix(self, value: str, tok: Token) -> str:
+        """Parse and validate the floating-point suffix of a constant token.
+        Returns the standard C type name for the suffix.
+        Raises ParseError for invalid suffixes.
+        """
+        lower = value.lower()
+        has_p = "p" in lower
+        has_e = "e" in lower
+
+        suffix_start = len(value)
+        i = len(value) - 1
+        while i >= 0 and lower[i] in "fl":
+            i -= 1
+        suffix = value[i + 1 :]
+
+        if not suffix:
+            return "double"
+
+        if len(suffix) > 1:
+            self._parse_error(
+                f"Invalid floating-point constant suffix: {suffix!r}",
+                self._tok_coord(tok),
+            )
+
+        s = suffix.lower()
+        if s == "f":
+            return "float"
+        elif s == "l":
+            return "long double"
+        else:
+            self._parse_error(
+                f"Invalid floating-point constant suffix: {suffix!r}",
+                self._tok_coord(tok),
+            )
+
+    def _char_const_type(self, tok_type: str) -> str:
+        """Return the type name for a character constant based on its token type."""
+        if tok_type == "CHAR_CONST":
+            return "char"
+        elif tok_type == "WCHAR_CONST":
+            return "wchar_t"
+        elif tok_type == "U8CHAR_CONST":
+            return "char"
+        elif tok_type == "U16CHAR_CONST":
+            return "char16_t"
+        elif tok_type == "U32CHAR_CONST":
+            return "char32_t"
+        else:
+            return "char"
+
+    def _get_string_prefix(self, value: str) -> str:
+        """Extract the encoding prefix from a string literal."""
+        if value.startswith("u8"):
+            return "u8"
+        elif value.startswith("L"):
+            return "L"
+        elif value.startswith("u"):
+            return "u"
+        elif value.startswith("U"):
+            return "U"
+        else:
+            return ""
+
+    def _get_string_prefix_len(self, value: str) -> int:
+        """Return the length of the encoding prefix of a string literal."""
+        if value.startswith("u8"):
+            return 2
+        elif value.startswith("L") or value.startswith("u") or value.startswith("U"):
+            return 1
+        else:
+            return 0
 
     # BNF: unified_string_literal : STRING_LITERAL+
     def _parse_unified_string_literal(self) -> c_ast.Node:
@@ -2048,10 +2256,16 @@ class CParser:
         tok = self._advance()
         if tok.type not in _WSTR_LITERAL:
             self._parse_error("Invalid string literal", self._tok_coord(tok))
+        first_type = tok.type
         node = c_ast.Constant("string", tok.value, self._tok_coord(tok))
+        prefix_len = self._get_string_prefix_len(tok.value)
         while self._peek_type() in _WSTR_LITERAL:
             tok2 = self._advance()
-            node.value = node.value.rstrip()[:-1] + tok2.value[2:]
+            if tok2.type != first_type:
+                self._parse_error(
+                    "Mixed string literal prefixes in concatenation", self._tok_coord(tok2)
+                )
+            node.value = node.value[:-1] + tok2.value[prefix_len + 1 :]
         return node
 
     # ------------------------------------------------------------------
